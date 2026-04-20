@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -NoProfile -Command 'Add-Type -AssemblyName System.Drawing; $bmp = New-Object System.Drawing.Bitmap 512,512; $g = [System.Drawing.Graphics]::FromImage\\($bmp\\); $g.SmoothingMode = '\\\\''AntiAlias'\\\\''; $bg = New-Object System.Drawing.SolidBrush \\([System.Drawing.Color]::FromArgb\\(48,109,84\\)\\); $g.FillRectangle\\($bg, 0, 0, 512, 512\\); $font = New-Object System.Drawing.Font\\('\\\\''Segoe UI'\\\\'', 280, [System.Drawing.FontStyle]::Bold\\); $fmt = New-Object System.Drawing.StringFormat; $fmt.Alignment = '\\\\''Center'\\\\''; $fmt.LineAlignment = '\\\\''Center'\\\\''; $g.DrawString\\('\\\\''N'\\\\'', $font, [System.Drawing.Brushes]::White, \\(New-Object System.Drawing.RectangleF 0,0,512,512\\), $fmt\\); $bmp.Save\\('\\\\''src-tauri/icons/source.png'\\\\'', [System.Drawing.Imaging.ImageFormat]::Png\\); $bmp.Dispose\\(\\); Write-Host '\\\\''ok'\\\\''')",
+      "Bash(npx --yes @tauri-apps/cli@latest icon src-tauri/icons/source.png)",
+      "Bash(cargo check *)",
+      "Bash(npm run *)",
+      "Bash(powershell.exe -NoProfile -Command \"Get-ItemProperty -Path 'HKLM:\\\\SOFTWARE\\\\WOW6432Node\\\\Microsoft\\\\EdgeUpdate\\\\Clients\\\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty pv\")"
+    ]
+  }
+}

@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root { height: 100%; }
+body { font-family: "Inter", system-ui, sans-serif; }
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition shadow-sm;
+  }
+  .btn-primary {
+    @apply btn bg-mint-600 text-white hover:bg-mint-700 active:bg-mint-800;
+  }
+  .btn-ghost {
+    @apply btn bg-transparent text-mint-800 hover:bg-mint-100;
+  }
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700;
+  }
+  .card {
+    @apply rounded-2xl bg-white shadow-card p-5 border border-mint-100;
+  }
+  .input {
+    @apply w-full rounded-lg border border-mint-200 bg-white px-3 py-2 text-sm
+           focus:outline-none focus:border-mint-500 focus:ring-2 focus:ring-mint-200;
+  }
+  .label { @apply text-xs font-medium text-mint-700; }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full bg-mint-100 px-2.5 py-0.5 text-xs
+           font-medium text-mint-800;
+  }
+  .chip-danger {
+    @apply inline-flex items-center gap-1 rounded-full bg-red-100 px-2.5 py-0.5 text-xs
+           font-medium text-red-700;
+  }
+  .table {
+    @apply w-full text-sm border-separate border-spacing-y-1;
+  }
+  .table th { @apply text-left text-xs font-semibold uppercase text-mint-600 px-2 py-1; }
+  .table td { @apply px-2 py-2 bg-white first:rounded-l-lg last:rounded-r-lg; }
+}
