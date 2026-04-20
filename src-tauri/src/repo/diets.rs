@@ -38,6 +38,56 @@ pub fn get_or_create(pool: &DbPool, user_id: i64, week_start: &str) -> AppResult
     })
 }
 
+/// Devuelve la dieta más reciente (por week_start DESC) que tenga al menos UNA porción
+/// asignada. Se usa como fallback cuando la dieta de la semana solicitada está vacía,
+/// para que el usuario no tenga que volver a configurar su dieta cada vez que cambia
+/// el calendario.
+pub fn get_latest_with_portions(
+    pool: &DbPool,
+    user_id: i64,
+) -> AppResult<Option<WeeklyDiet>> {
+    let conn = pool.get()?;
+    // Tomamos el diet_id más reciente (week_start DESC) que tenga al menos una porción.
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT wd.id, wd.week_start
+             FROM weekly_diets wd
+             WHERE wd.user_id = ?1
+               AND EXISTS (
+                 SELECT 1 FROM diet_portions dp WHERE dp.diet_id = wd.id
+               )
+             ORDER BY wd.week_start DESC
+             LIMIT 1",
+            params![user_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    let Some((id, week_start)) = row else {
+        return Ok(None);
+    };
+    let mut stmt = conn.prepare(
+        "SELECT dp.meal_type, dp.group_id, g.name, dp.portions
+         FROM diet_portions dp JOIN food_groups g ON g.id = dp.group_id
+         WHERE dp.diet_id = ?1",
+    )?;
+    let portions = stmt
+        .query_map([id], |r| {
+            Ok(DietPortion {
+                meal_type: r.get(0)?,
+                group_id: r.get(1)?,
+                group_name: r.get(2)?,
+                portions: r.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(WeeklyDiet {
+        id,
+        user_id,
+        week_start,
+        portions,
+    }))
+}
+
 pub fn set_portion(
     pool: &DbPool,
     diet_id: i64,

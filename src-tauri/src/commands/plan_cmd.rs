@@ -42,6 +42,7 @@ pub async fn meal_design(
     let req = meal_planner::build_request(&state.pool, &user_ids, &week_start, None, notes)?;
     // Si el frontend no mandó meal_type asumimos "comida" (la comida fuerte del día).
     let meal_type = meal_type.unwrap_or_else(|| "comida".to_string());
+    meal_planner::preflight_meal_type(&req, &meal_type)?;
     plan_generator::generate_single_meal(&api_key, &req, &meal_type).await
 }
 
@@ -57,6 +58,7 @@ pub async fn meal_options(
 ) -> AppResult<MealOptions> {
     let api_key = repo::settings::get_openai_key(&state.pool)?;
     let req = meal_planner::build_request(&state.pool, &user_ids, &week_start, None, notes)?;
+    meal_planner::preflight_meal_type(&req, &meal_type)?;
     plan_generator::generate_meal_options(&api_key, &req, &meal_type, count, &exclude_names).await
 }
 
@@ -71,6 +73,7 @@ pub async fn plan_tweak_meal(
 ) -> AppResult<PlanMeal> {
     let api_key = repo::settings::get_openai_key(&state.pool)?;
     let req = meal_planner::build_request(&state.pool, &user_ids, &week_start, None, None)?;
+    meal_planner::preflight_meal_type(&req, &original.meal_type)?;
     // Extraemos componentes relevantes para el tweak.
     let users: Vec<PlanUser> = req.users;
     let allowed: Vec<AllowedGroup> = req.allowed_foods_by_group;

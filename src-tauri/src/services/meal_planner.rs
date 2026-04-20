@@ -6,7 +6,7 @@ use crate::ai::plan_generator::{
     AllowedGroup, PlanPortion, PlanRequest, PlanSmoothie, PlanUser,
 };
 use crate::db::DbPool;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::repo;
 use crate::services::family_compat;
 
@@ -52,9 +52,27 @@ pub fn build_request(
     let mut smoothies: Vec<PlanSmoothie> = Vec::new();
     for uid in user_ids {
         let user = repo::users::get(pool, *uid)?;
+        // Primero probamos la dieta de la fecha solicitada.
         let diet = repo::diets::get_or_create(pool, *uid, start_date)?;
-        let portions = diet
-            .portions
+        // Si esa dieta está vacía (caso común: el usuario configuró su dieta para una
+        // semana distinta y hoy abrió "Cocinar"/"Mi plan" en otra fecha), hacemos
+        // fallback a la dieta más reciente que sí tenga porciones asignadas.
+        let effective_portions = if diet.portions.is_empty() {
+            match repo::diets::get_latest_with_portions(pool, *uid)? {
+                Some(fallback) => fallback.portions,
+                None => {
+                    return Err(AppError::InvalidAi(format!(
+                        "El usuario '{}' no tiene ninguna dieta configurada todavía. \
+                         Ve a 'Mi plan', selecciona una semana y asigna las porciones \
+                         por tiempo de comida antes de generar comidas con IA.",
+                        user.name
+                    )));
+                }
+            }
+        } else {
+            diet.portions
+        };
+        let portions: Vec<PlanPortion> = effective_portions
             .iter()
             .map(|p| PlanPortion {
                 meal_type: p.meal_type.clone(),
@@ -91,6 +109,28 @@ pub fn build_request(
         day_labels,
         notes,
     })
+}
+
+/// Verifica que, para un comando de UNA sola comida, todos los usuarios tengan al
+/// menos UNA porción asignada para ese meal_type. Así evitamos mandar peticiones a
+/// la IA que el validador rechazará seguro (ahorrando tokens y dando un error claro).
+pub fn preflight_meal_type(req: &PlanRequest, meal_type: &str) -> AppResult<()> {
+    let mut missing: Vec<String> = Vec::new();
+    for u in &req.users {
+        let has_any = u.portions.iter().any(|p| p.meal_type == meal_type);
+        if !has_any {
+            missing.push(u.name.clone());
+        }
+    }
+    if !missing.is_empty() {
+        let names = missing.join(", ");
+        return Err(AppError::InvalidAi(format!(
+            "Los siguientes usuarios no tienen porciones configuradas para '{meal_type}': \
+             {names}. Ve a 'Mi plan' y asigna sus porciones para ese tiempo de comida antes \
+             de generar con IA."
+        )));
+    }
+    Ok(())
 }
 
 fn build_day_labels(start_iso: &str, end_iso: &str) -> Vec<String> {
