@@ -22,6 +22,14 @@ struct ChatMsg<'a> {
     content: &'a str,
 }
 
+/// Versión dueña (owned) usada cuando construimos la conversación dinámicamente
+/// con reintentos: el modelo puede ver su respuesta anterior + nuestro feedback.
+#[derive(Clone)]
+pub struct ChatMsgOwned {
+    pub role: String,
+    pub content: String,
+}
+
 #[derive(Serialize)]
 struct ResponseFormat {
     #[serde(rename = "type")]
@@ -43,13 +51,27 @@ struct ChatRespMsg {
     content: String,
 }
 
+/// Llamada simple de un system + un user.
 pub async fn chat_json(api_key: &str, system: &str, user: &str) -> AppResult<String> {
+    let messages = vec![
+        ChatMsgOwned { role: "system".into(), content: system.to_string() },
+        ChatMsgOwned { role: "user".into(), content: user.to_string() },
+    ];
+    chat_json_messages(api_key, &messages).await
+}
+
+/// Llamada multi-turno, para flujos con reintentos donde le pasamos al modelo
+/// su propia respuesta previa + un mensaje de corrección.
+pub async fn chat_json_messages(
+    api_key: &str,
+    messages: &[ChatMsgOwned],
+) -> AppResult<String> {
     let req = ChatReq {
         model: MODEL,
-        messages: vec![
-            ChatMsg { role: "system", content: system },
-            ChatMsg { role: "user", content: user },
-        ],
+        messages: messages
+            .iter()
+            .map(|m| ChatMsg { role: &m.role, content: &m.content })
+            .collect(),
         response_format: ResponseFormat { kind: "json_object" },
         temperature: 0.4,
     };

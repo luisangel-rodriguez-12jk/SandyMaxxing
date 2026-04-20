@@ -58,7 +58,14 @@ export type Smoothie = {
 };
 
 export type PlanIngredient = { name: string; quantity: number; unit: string };
-export type PlanUserPortion = { user: string; notes: string };
+export type GroupPortion = { group: string; portions: number };
+export type PlanUserPortion = {
+  user: string;
+  notes: string;
+  /** Conteo explícito de porciones por grupo que consume ese usuario en esa comida.
+   * Puede no venir si el plan fue generado con una versión vieja. */
+  portions_consumed?: GroupPortion[];
+};
 export type PlanMeal = {
   meal_type: string;
   name: string;
@@ -207,11 +214,17 @@ export const api = {
       endDate: end_date,
       notes,
     }),
-  mealDesign: (user_ids: number[], week_start: string, notes: string | null) =>
+  mealDesign: (
+    user_ids: number[],
+    week_start: string,
+    notes: string | null,
+    meal_type: string | null,
+  ) =>
     tauriInvoke<SingleMeal>("meal_design", {
       userIds: user_ids,
       weekStart: week_start,
       notes,
+      mealType: meal_type,
     }),
   mealOptions: (
     user_ids: number[],

@@ -170,10 +170,22 @@ export default function DisenarComida() {
                 {m.per_user_portions.length > 0 && (
                   <div>
                     <h3 className="font-medium text-sm">Porciones por persona</h3>
-                    <ul className="text-sm">
+                    <ul className="text-sm space-y-1.5">
                       {m.per_user_portions.map((p, k) => (
                         <li key={k}>
                           <strong>{p.user}:</strong> {p.notes}
+                          {p.portions_consumed && p.portions_consumed.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {p.portions_consumed.map((gp, j) => (
+                                <span
+                                  key={j}
+                                  className="inline-flex items-center rounded-full bg-mint-100 text-mint-800 px-2 py-0.5 text-[11px]"
+                                >
+                                  {gp.group}: {gp.portions}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         </li>
                       ))}
                     </ul>

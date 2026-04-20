@@ -1,7 +1,7 @@
 use tauri::State;
 
 use crate::ai::plan_generator::{
-    self, AllowedGroup, MealOptions, PlanMeal, PlanRequest, PlanResult, PlanUser, SingleMeal,
+    self, AllowedGroup, MealOptions, PlanMeal, PlanResult, PlanUser, SingleMeal,
 };
 use crate::app_state::SharedState;
 use crate::db::models::SavedPlan;
@@ -36,10 +36,13 @@ pub async fn meal_design(
     user_ids: Vec<i64>,
     week_start: String,
     notes: Option<String>,
+    meal_type: Option<String>,
 ) -> AppResult<SingleMeal> {
     let api_key = repo::settings::get_openai_key(&state.pool)?;
     let req = meal_planner::build_request(&state.pool, &user_ids, &week_start, None, notes)?;
-    plan_generator::generate_single_meal(&api_key, &req).await
+    // Si el frontend no mandó meal_type asumimos "comida" (la comida fuerte del día).
+    let meal_type = meal_type.unwrap_or_else(|| "comida".to_string());
+    plan_generator::generate_single_meal(&api_key, &req, &meal_type).await
 }
 
 #[tauri::command]

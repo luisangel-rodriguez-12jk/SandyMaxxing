@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+use crate::ai::ChatMsgOwned;
 use crate::error::{AppError, AppResult};
+use crate::services::meal_validator;
+
+/// Número máximo de intentos con feedback correctivo para la IA.
+/// 1 intento original + hasta 2 reintentos = 3 llamadas como máximo por operación.
+const MAX_RETRIES: usize = 2;
 
 #[derive(Serialize)]
 pub struct PlanRequest {
@@ -60,10 +66,23 @@ pub struct PlanIngredient {
     pub unit: String,
 }
 
+/// Cuántas porciones de un grupo alimenticio consume un usuario en UNA comida.
+/// Por ejemplo: {group:"Proteínas", portions:2.0}.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GroupPortion {
+    pub group: String,
+    pub portions: f64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlanUserPortion {
     pub user: String,
     pub notes: String,
+    /// Conteo explícito de porciones por grupo que ESTE usuario se come en ESTA comida.
+    /// Debe coincidir EXACTO con user.portions filtradas por el meal_type correspondiente.
+    /// Con serde(default) para que planes viejos (sin este campo) sigan cargando.
+    #[serde(default)]
+    pub portions_consumed: Vec<GroupPortion>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -73,16 +92,30 @@ pub struct PlanResult {
 
 // Bloque reutilizable: la regla DURA sobre porciones y cómo expresarlas.
 const PORTIONS_RULE: &str = "\
-REGLA DURA DE PORCIONES (no negociable): cada usuario tiene en 'portions' una lista con \
-{meal_type, group, portions}. Para CADA comida que propongas, la distribución de ingredientes para \
-CADA usuario debe sumar EXACTAMENTE las porciones que ese usuario tiene asignadas para ese meal_type, \
-sin pasarse ni quedarse corto — por grupo. Ejemplo: si un usuario tiene en 'comida' {Proteínas:2, \
-Cereales:2, Verduras:2, Grasas:1} entonces la ración de ese usuario en la comida debe equivaler a \
-2 proteínas + 2 cereales + 2 verduras + 1 grasa. \
-En el campo 'per_user_portions[i].notes' DEBES escribir explícitamente el conteo por grupo que le \
-toca a ese usuario, con este formato: 'Proteína: 2 (120 g pechuga de pollo) · Cereales: 2 (1 taza \
-arroz) · Verduras: 2 (2 tazas ensalada) · Grasas: 1 (1 cdita aceite)'. Si el tamaño del platillo es \
-distinto para cada usuario, indícalo claramente en esas notas. ";
+REGLA DURA DE PORCIONES (NO NEGOCIABLE, se valida por código y si fallas se te rechaza la respuesta): \
+cada usuario tiene en 'portions' una lista con {meal_type, group, portions}. Para CADA comida que \
+propongas, los ingredientes para CADA usuario deben sumar EXACTAMENTE las porciones que ese usuario \
+tiene asignadas para ese meal_type específico, por grupo, sin pasarse ni quedarse corto. Si un \
+usuario NO tiene asignaciones de un grupo en ese meal_type, NO incluyas ese grupo para ese usuario. \
+\
+EN CADA 'per_user_portions[i]' DEBES incluir dos cosas: \
+1) 'notes' (texto en español) con el detalle humano: 'Proteína: 2 (120 g pechuga de pollo) · \
+   Cereales: 2 (1 taza arroz) · Verduras: 2 (2 tazas ensalada) · Grasas: 1 (1 cdita aceite)'. \
+2) 'portions_consumed': arreglo con {group, portions} por cada grupo que ese usuario consume en \
+   esa comida. Debe reflejar EXACTAMENTE las porciones asignadas. Ejemplo concreto: si el usuario \
+   tiene en 'comida' {Proteínas:2, Cereales:2, Verduras:2, Grasas:1}, entonces: \
+   portions_consumed = [ \
+     {\"group\":\"Proteínas\",\"portions\":2}, \
+     {\"group\":\"Cereales\",\"portions\":2}, \
+     {\"group\":\"Verduras\",\"portions\":2}, \
+     {\"group\":\"Grasas\",\"portions\":1} \
+   ]. \
+NO inventes un grupo que el usuario no tenga. NO omitas un grupo que el usuario sí tenga. Los \
+nombres de los grupos deben coincidir con los de 'allowed_foods_by_group' y 'user.portions'. \
+\
+PROHIBIDOS (NO NEGOCIABLE): si un ingrediente aparece en el arreglo 'forbidden' de CUALQUIER \
+usuario, NO puedes ponerlo en 'ingredients' (ni como sustituto ni como opcional). Revisa cada \
+ingrediente contra TODOS los forbidden de TODOS los usuarios antes de escribirlo. ";
 
 const SYSTEM: &str = "Eres un nutriólogo experto que diseña planes de alimentación para familias. \
 Recibirás un objeto JSON con: (a) la lista de usuarios con sus porciones asignadas por grupo y sus \
@@ -107,7 +140,8 @@ per_user_portions qué toma cada uno. \
 Devuelve EXCLUSIVAMENTE un objeto JSON con este esquema: \
 {\"days\":[{\"day\":string,\"meals\":[{\"meal_type\":string,\"name\":string,\"instructions\":string,\
 \"ingredients\":[{\"name\":string,\"quantity\":number,\"unit\":string}],\
-\"per_user_portions\":[{\"user\":string,\"notes\":string}]}]}]}. \
+\"per_user_portions\":[{\"user\":string,\"notes\":string,\
+\"portions_consumed\":[{\"group\":string,\"portions\":number}]}]}]}]}. \
 El arreglo 'days' DEBE tener EXACTAMENTE la misma longitud y el mismo ORDEN que 'day_labels', y \
 cada entrada 'day' DEBE coincidir textualmente con el label correspondiente. \
 Cada día DEBE tener 5 comidas con meal_type en este orden: desayuno, colacion1, comida, colacion2, cena. \
@@ -118,20 +152,108 @@ allowed_foods_by_group y NUNCA los prohibidos de ningún usuario. \
 El campo 'instructions' debe contener pasos numerados con tiempos aproximados de cocción, utensilios \
 y tips. \
 En 'per_user_portions' incluye UN elemento por cada usuario. \
-\
-PORCIONES: La suma total de porciones (por grupo) consumidas por UN usuario a lo largo de los 5 \
-tiempos de comida de UN día DEBE coincidir con la suma de sus 'portions' diarias. No uses un grupo \
-que ese usuario no tenga asignado. No excedas la cuota. \
 ";
 
-// Nota: concatenamos PORTIONS_RULE al final.
+// ---------- helpers de reintento ----------
+
+fn build_feedback_message(issues: &[String]) -> String {
+    // Cap para no reventar el contexto si son muchísimos errores.
+    let capped: Vec<&String> = issues.iter().take(25).collect();
+    let bullets = capped
+        .iter()
+        .map(|i| format!("- {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Tu respuesta anterior violó estas reglas duras (las valida el sistema, NO son opcionales). \
+         Regenera TODO el JSON con el MISMO esquema corrigiendo exactamente estos puntos, sin \
+         introducir nuevos errores:\n\n{bullets}\n\n\
+         Recuerda: portions_consumed debe cuadrar EXACTO con user.portions para ese meal_type, \
+         los ingredientes deben estar en allowed_foods_by_group y NO estar en forbidden de ningún \
+         usuario. Devuelve SOLO el JSON final válido."
+    )
+}
+
+/// Ejecuta una llamada con reintentos: si el validador encuentra problemas, le pide a la IA
+/// que corrija el JSON. `validate` devuelve la lista de issues (vacía si OK).
+async fn chat_with_validation<T, V>(
+    api_key: &str,
+    system: &str,
+    user_content: &str,
+    parse_label: &str,
+    mut validate: V,
+) -> AppResult<T>
+where
+    T: for<'de> Deserialize<'de>,
+    V: FnMut(&T) -> Vec<String>,
+{
+    let mut messages = vec![
+        ChatMsgOwned { role: "system".into(), content: system.to_string() },
+        ChatMsgOwned { role: "user".into(), content: user_content.to_string() },
+    ];
+    let mut last_err = String::from("sin respuesta");
+
+    for attempt in 0..=MAX_RETRIES {
+        let content = super::chat_json_messages(api_key, &messages).await?;
+        match serde_json::from_str::<T>(&content) {
+            Ok(parsed) => {
+                let issues = validate(&parsed);
+                if issues.is_empty() {
+                    return Ok(parsed);
+                }
+                last_err = issues.join(" | ");
+                if attempt == MAX_RETRIES {
+                    return Err(AppError::InvalidAi(format!(
+                        "{parse_label}: la IA no respetó las reglas después de {} intentos. \
+                         Problemas restantes: {last_err}",
+                        MAX_RETRIES + 1
+                    )));
+                }
+                // Alimentamos al modelo con su respuesta + el feedback correctivo.
+                messages.push(ChatMsgOwned { role: "assistant".into(), content });
+                messages.push(ChatMsgOwned {
+                    role: "user".into(),
+                    content: build_feedback_message(&issues),
+                });
+            }
+            Err(e) => {
+                last_err = e.to_string();
+                if attempt == MAX_RETRIES {
+                    return Err(AppError::InvalidAi(format!("{parse_label}: {last_err}")));
+                }
+                messages.push(ChatMsgOwned { role: "assistant".into(), content });
+                messages.push(ChatMsgOwned {
+                    role: "user".into(),
+                    content: format!(
+                        "Tu respuesta no es JSON válido según el esquema pedido. Error de parseo: \
+                         {last_err}. Regenera la respuesta cumpliendo EXACTAMENTE el esquema \
+                         indicado y sin texto fuera del JSON."
+                    ),
+                });
+            }
+        }
+    }
+    Err(AppError::InvalidAi(format!(
+        "{parse_label}: ciclo de reintentos terminó sin éxito. Último error: {last_err}"
+    )))
+}
+
+// ---------- generate (plan semanal) ----------
+
 pub async fn generate(api_key: &str, req: &PlanRequest) -> AppResult<PlanResult> {
     let system = format!("{SYSTEM}\n\n{PORTIONS_RULE}Todo en español, natural y claro.");
     let user_content = serde_json::to_string(req)?;
-    let content = super::chat_json(api_key, &system, &user_content).await?;
-    serde_json::from_str::<PlanResult>(&content)
-        .map_err(|e| AppError::InvalidAi(format!("plan inválido: {e}")))
+    chat_with_validation::<PlanResult, _>(
+        api_key,
+        &system,
+        &user_content,
+        "plan inválido",
+        |plan| meal_validator::validate_plan(plan, req),
+    )
+    .await
 }
+
+// ---------- single meal ----------
 
 const SINGLE_MEAL_SYSTEM: &str = "Eres un nutriólogo que diseña UNA sola comida compatible para una familia. \
 Recibirás un objeto JSON con usuarios, sus porciones, alimentos permitidos agrupados, licuados \
@@ -147,7 +269,8 @@ proteínas animales (res, cerdo, pollo, pescado) que estén en la lista de permi
 Devuelve EXCLUSIVAMENTE un objeto JSON con el esquema: \
 {\"name\":string,\"instructions\":string,\
 \"ingredients\":[{\"name\":string,\"quantity\":number,\"unit\":string}],\
-\"per_user_portions\":[{\"user\":string,\"notes\":string}]}. \
+\"per_user_portions\":[{\"user\":string,\"notes\":string,\
+\"portions_consumed\":[{\"group\":string,\"portions\":number}]}]}. \
 El 'name' puede ser un nombre común de cocina casera o de restaurante (tacos de res, hamburguesa, \
 bowl de pollo, pizza margarita casera) — es SOLO una etiqueta. \
 'ingredients' en cambio SÍ debe listar únicamente alimentos que aparezcan textualmente en \
@@ -163,12 +286,32 @@ pub struct SingleMeal {
     pub per_user_portions: Vec<PlanUserPortion>,
 }
 
-pub async fn generate_single_meal(api_key: &str, req: &PlanRequest) -> AppResult<SingleMeal> {
+#[derive(Serialize)]
+struct SingleMealRequest<'a> {
+    #[serde(flatten)]
+    base: &'a PlanRequest,
+    meal_type: String,
+}
+
+pub async fn generate_single_meal(
+    api_key: &str,
+    req: &PlanRequest,
+    meal_type: &str,
+) -> AppResult<SingleMeal> {
     let system = format!("{SINGLE_MEAL_SYSTEM}\n\n{PORTIONS_RULE}Todo en español.");
-    let user_content = serde_json::to_string(req)?;
-    let content = super::chat_json(api_key, &system, &user_content).await?;
-    serde_json::from_str::<SingleMeal>(&content)
-        .map_err(|e| AppError::InvalidAi(format!("comida inválida: {e}")))
+    let wrapped = SingleMealRequest {
+        base: req,
+        meal_type: meal_type.to_string(),
+    };
+    let user_content = serde_json::to_string(&wrapped)?;
+    chat_with_validation::<SingleMeal, _>(
+        api_key,
+        &system,
+        &user_content,
+        "comida inválida",
+        |meal| meal_validator::validate_single_meal(meal, req, meal_type),
+    )
+    .await
 }
 
 // ---- Múltiples opciones de comida ----
@@ -208,7 +351,8 @@ combinaciones compatibles. \
 Devuelve EXCLUSIVAMENTE un objeto JSON con el esquema: \
 {\"options\":[{\"name\":string,\"instructions\":string,\
 \"ingredients\":[{\"name\":string,\"quantity\":number,\"unit\":string}],\
-\"per_user_portions\":[{\"user\":string,\"notes\":string}]}]}. \
+\"per_user_portions\":[{\"user\":string,\"notes\":string,\
+\"portions_consumed\":[{\"group\":string,\"portions\":number}]}]}]}. \
 Debes proponer EXACTAMENTE la cantidad que se te pida en el campo 'count'. \
 Cada opción DEBE ser DIFERENTE entre sí y DIFERENTE de los nombres listados en 'exclude_names'. \
 El meal_type indica el momento del día (desayuno, colacion1, comida, colacion2 o cena) — ajusta \
@@ -234,9 +378,14 @@ pub async fn generate_meal_options(
     };
     let system = format!("{MEAL_OPTIONS_SYSTEM}\n\n{PORTIONS_RULE}Todo en español.");
     let user_content = serde_json::to_string(&wrapped)?;
-    let content = super::chat_json(api_key, &system, &user_content).await?;
-    serde_json::from_str::<MealOptions>(&content)
-        .map_err(|e| AppError::InvalidAi(format!("opciones inválidas: {e}")))
+    chat_with_validation::<MealOptions, _>(
+        api_key,
+        &system,
+        &user_content,
+        "opciones inválidas",
+        |opts| meal_validator::validate_meal_options(opts, req, meal_type),
+    )
+    .await
 }
 
 // ---- Reemplazar/ajustar una comida de un plan existente ----
@@ -265,7 +414,8 @@ NUNCA te rehúses a proponer la comida: siempre encuentra la mejor combinación 
 Devuelve EXCLUSIVAMENTE un objeto JSON con el esquema: \
 {\"meal_type\":string,\"name\":string,\"instructions\":string,\
 \"ingredients\":[{\"name\":string,\"quantity\":number,\"unit\":string}],\
-\"per_user_portions\":[{\"user\":string,\"notes\":string}]}. \
+\"per_user_portions\":[{\"user\":string,\"notes\":string,\
+\"portions_consumed\":[{\"group\":string,\"portions\":number}]}]}. \
 Mantén el mismo meal_type que 'original_meal'. \
 El 'name' puede ser un nombre común de cocina casera o de restaurante — es SOLO una etiqueta. \
 'ingredients' SÍ debe listar únicamente alimentos que aparezcan textualmente en \
@@ -289,7 +439,57 @@ pub async fn tweak_meal(
     };
     let system = format!("{TWEAK_SYSTEM}\n\n{PORTIONS_RULE}Todo en español.");
     let user_content = serde_json::to_string(&wrapped)?;
-    let content = super::chat_json(api_key, &system, &user_content).await?;
-    serde_json::from_str::<PlanMeal>(&content)
-        .map_err(|e| AppError::InvalidAi(format!("comida ajustada inválida: {e}")))
+
+    // Para validar, armamos un PlanRequest sintético con la misma info que ve el modelo.
+    // Copiamos users y allowed porque el validador necesita &PlanRequest.
+    let synthetic_users: Vec<PlanUser> = users
+        .iter()
+        .map(|u| PlanUser {
+            name: u.name.clone(),
+            portions: u
+                .portions
+                .iter()
+                .map(|p| PlanPortion {
+                    meal_type: p.meal_type.clone(),
+                    group: p.group.clone(),
+                    portions: p.portions,
+                })
+                .collect(),
+            forbidden: u.forbidden.clone(),
+        })
+        .collect();
+    let synthetic_allowed: Vec<AllowedGroup> = allowed
+        .iter()
+        .map(|g| AllowedGroup {
+            group: g.group.clone(),
+            foods: g.foods.clone(),
+        })
+        .collect();
+    let synthetic_req = PlanRequest {
+        users: synthetic_users,
+        allowed_foods_by_group: synthetic_allowed,
+        smoothies: vec![],
+        day_labels: vec![],
+        notes: None,
+    };
+    let original_meal_type = original.meal_type.clone();
+
+    chat_with_validation::<PlanMeal, _>(
+        api_key,
+        &system,
+        &user_content,
+        "comida ajustada inválida",
+        move |meal| {
+            let mut issues = meal_validator::validate_plan_meal(meal, &synthetic_req);
+            // Además el meal_type debe mantenerse.
+            if meal.meal_type != original_meal_type {
+                issues.push(format!(
+                    "El meal_type debe mantenerse como '{}', no '{}'.",
+                    original_meal_type, meal.meal_type
+                ));
+            }
+            issues
+        },
+    )
+    .await
 }

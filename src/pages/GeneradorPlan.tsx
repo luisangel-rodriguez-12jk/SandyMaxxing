@@ -411,10 +411,22 @@ export default function GeneradorPlan() {
                         ))}
                       </ul>
                       {m.per_user_portions.length > 0 && (
-                        <div className="mt-2 text-xs text-mint-700 bg-mint-50 p-2 rounded">
+                        <div className="mt-2 text-xs text-mint-700 bg-mint-50 p-2 rounded space-y-1.5">
                           {m.per_user_portions.map((p, k) => (
                             <div key={k}>
                               <strong>{p.user}:</strong> {p.notes}
+                              {p.portions_consumed && p.portions_consumed.length > 0 && (
+                                <div className="flex flex-wrap gap-1 mt-1">
+                                  {p.portions_consumed.map((gp, j) => (
+                                    <span
+                                      key={j}
+                                      className="inline-flex items-center rounded-full bg-white border border-mint-200 text-mint-800 px-2 py-0.5 text-[10px]"
+                                    >
+                                      {gp.group}: {gp.portions}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
                             </div>
                           ))}
                         </div>
