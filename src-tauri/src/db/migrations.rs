@@ -142,6 +142,11 @@ pub fn run(conn: &Connection) -> AppResult<()> {
 fn upgrade_existing_schema(conn: &Connection) -> AppResult<()> {
     ensure_column(conn, "food_groups", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "foods", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
+    // Favoritas: añadimos meal_type y created_at a la tabla recipes existente.
+    // En ALTER TABLE de SQLite el default no puede ser una expresión, así que
+    // dejamos ambas columnas nullables y las rellenamos en el INSERT.
+    ensure_column(conn, "recipes", "meal_type", "TEXT")?;
+    ensure_column(conn, "recipes", "created_at", "TEXT")?;
     reseed_if_bundled_foods(conn)?;
     Ok(())
 }

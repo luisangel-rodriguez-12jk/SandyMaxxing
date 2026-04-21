@@ -90,6 +90,8 @@ pub struct Recipe {
     pub name: String,
     pub instructions: String,
     pub created_by_ai: bool,
+    pub meal_type: Option<String>,
+    pub created_at: Option<String>,
     pub ingredients: Vec<RecipeIngredient>,
 }
 

@@ -94,6 +94,24 @@ export type SavedPlan = {
   created_at: string;
 };
 
+export type RecipeIngredient = {
+  food_id: number | null;
+  free_name: string | null;
+  name: string;
+  quantity: number;
+  unit: string;
+};
+
+export type Recipe = {
+  id: number;
+  name: string;
+  instructions: string;
+  created_by_ai: boolean;
+  meal_type: string | null;
+  created_at: string | null;
+  ingredients: RecipeIngredient[];
+};
+
 export type ShoppingItem = {
   name: string;
   group_name: string;
@@ -276,6 +294,23 @@ export const api = {
       notes,
     }),
   savedPlansDelete: (id: number) => tauriInvoke<void>("saved_plans_delete", { id }),
+
+  recipesList: (meal_type: string | null) =>
+    tauriInvoke<Recipe[]>("recipes_list", { mealType: meal_type }),
+  recipesSave: (p: {
+    name: string;
+    instructions: string;
+    meal_type: string;
+    ingredients: { name: string; quantity: number; unit: string }[];
+  }) =>
+    tauriInvoke<number>("recipes_save", {
+      name: p.name,
+      instructions: p.instructions,
+      mealType: p.meal_type,
+      ingredients: p.ingredients,
+      createdByAi: true,
+    }),
+  recipesDelete: (id: number) => tauriInvoke<void>("recipes_delete", { id }),
 
   familyList: () => tauriInvoke<FamilyPlan[]>("family_plans_list"),
   familyCreate: (name: string, week_start: string, user_ids: number[]) =>

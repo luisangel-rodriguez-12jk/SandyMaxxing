@@ -4,6 +4,7 @@ pub mod foods_cmd;
 pub mod diet_cmd;
 pub mod smoothie_cmd;
 pub mod plan_cmd;
+pub mod recipes_cmd;
 pub mod family_cmd;
 pub mod shopping_cmd;
 pub mod pdf_cmd;

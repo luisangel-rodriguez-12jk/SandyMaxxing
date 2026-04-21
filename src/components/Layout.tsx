@@ -1,5 +1,6 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { t } from "../i18n/es";
+import AiProgress from "./AiProgress";
 import UserSwitcher from "./UserSwitcher";
 
 const links: { to: string; label: string; icon: string }[] = [
@@ -42,6 +43,7 @@ export default function Layout() {
       <main className="flex-1 overflow-y-auto p-8">
         <Outlet />
       </main>
+      <AiProgress />
     </div>
   );
 }

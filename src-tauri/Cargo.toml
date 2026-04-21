@@ -1,6 +1,6 @@
 [package]
 name = "sandymaxxing"
-version = "1.0.2"
+version = "1.0.4"
 description = "SandyMaxxing - nutrition & family meal planning desktop app"
 authors = ["SandyMaxxing"]
 edition = "2021"

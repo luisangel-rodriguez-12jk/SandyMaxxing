@@ -1,53 +1,139 @@
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::ai::plan_generator::{
     self, AllowedGroup, MealOptions, PlanMeal, PlanResult, PlanUser, SingleMeal,
 };
 use crate::app_state::SharedState;
 use crate::db::models::SavedPlan;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::repo;
 use crate::services::meal_planner;
 
+/// Pequeño helper para emitir eventos "start" / "done" / "error" alrededor de
+/// la llamada a la IA, de modo que el frontend pueda mostrar una barra de
+/// progreso informativa mientras la generación se ejecuta. Los eventos
+/// intermedios ('requesting', 'validating', 'retrying') los emite el propio
+/// plan_generator durante el ciclo de chat + validación.
+fn emit_start(app: &AppHandle, label: &str) {
+    let _ = app.emit(
+        "ai_progress",
+        serde_json::json!({
+            "stage": "start",
+            "label": label,
+        }),
+    );
+}
+
+fn emit_done(app: &AppHandle, label: &str) {
+    let _ = app.emit(
+        "ai_progress",
+        serde_json::json!({
+            "stage": "done",
+            "label": label,
+        }),
+    );
+}
+
+fn emit_error(app: &AppHandle, label: &str, err: &AppError) {
+    let _ = app.emit(
+        "ai_progress",
+        serde_json::json!({
+            "stage": "error",
+            "label": label,
+            "message": err.to_string(),
+        }),
+    );
+}
+
 #[tauri::command]
 pub async fn plan_generate(
+    app: AppHandle,
     state: State<'_, SharedState>,
     user_ids: Vec<i64>,
     week_start: String,
     end_date: Option<String>,
     notes: Option<String>,
 ) -> AppResult<PlanResult> {
-    let api_key = repo::settings::get_openai_key(&state.pool)?;
-    // Si el frontend no mandó end_date, asumimos semana (start + 6 días).
+    let label = "plan semanal";
+    emit_start(&app, label);
+    let api_key = match repo::settings::get_openai_key(&state.pool) {
+        Ok(k) => k,
+        Err(e) => {
+            emit_error(&app, label, &e);
+            return Err(e);
+        }
+    };
     let end = end_date.unwrap_or_else(|| default_end_date(&week_start));
-    let req = meal_planner::build_request(
+    let req = match meal_planner::build_request(
         &state.pool,
         &user_ids,
         &week_start,
         Some(end.as_str()),
         notes,
-    )?;
-    plan_generator::generate(&api_key, &req).await
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            emit_error(&app, label, &e);
+            return Err(e);
+        }
+    };
+    match plan_generator::generate(&app, &api_key, &req).await {
+        Ok(plan) => {
+            emit_done(&app, label);
+            Ok(plan)
+        }
+        Err(e) => {
+            emit_error(&app, label, &e);
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
 pub async fn meal_design(
+    app: AppHandle,
     state: State<'_, SharedState>,
     user_ids: Vec<i64>,
     week_start: String,
     notes: Option<String>,
     meal_type: Option<String>,
 ) -> AppResult<SingleMeal> {
-    let api_key = repo::settings::get_openai_key(&state.pool)?;
-    let req = meal_planner::build_request(&state.pool, &user_ids, &week_start, None, notes)?;
-    // Si el frontend no mandó meal_type asumimos "comida" (la comida fuerte del día).
+    let label = "comida individual";
+    emit_start(&app, label);
+    let api_key = match repo::settings::get_openai_key(&state.pool) {
+        Ok(k) => k,
+        Err(e) => {
+            emit_error(&app, label, &e);
+            return Err(e);
+        }
+    };
+    let req = match meal_planner::build_request(&state.pool, &user_ids, &week_start, None, notes) {
+        Ok(r) => r,
+        Err(e) => {
+            emit_error(&app, label, &e);
+            return Err(e);
+        }
+    };
     let meal_type = meal_type.unwrap_or_else(|| "comida".to_string());
-    meal_planner::preflight_meal_type(&req, &meal_type)?;
-    plan_generator::generate_single_meal(&api_key, &req, &meal_type).await
+    if let Err(e) = meal_planner::preflight_meal_type(&req, &meal_type) {
+        emit_error(&app, label, &e);
+        return Err(e);
+    }
+    match plan_generator::generate_single_meal(&app, &api_key, &req, &meal_type).await {
+        Ok(meal) => {
+            emit_done(&app, label);
+            Ok(meal)
+        }
+        Err(e) => {
+            emit_error(&app, label, &e);
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
 pub async fn meal_options(
+    app: AppHandle,
     state: State<'_, SharedState>,
     user_ids: Vec<i64>,
     week_start: String,
@@ -56,14 +142,50 @@ pub async fn meal_options(
     count: u32,
     exclude_names: Vec<String>,
 ) -> AppResult<MealOptions> {
-    let api_key = repo::settings::get_openai_key(&state.pool)?;
-    let req = meal_planner::build_request(&state.pool, &user_ids, &week_start, None, notes)?;
-    meal_planner::preflight_meal_type(&req, &meal_type)?;
-    plan_generator::generate_meal_options(&api_key, &req, &meal_type, count, &exclude_names).await
+    let label = "opciones de comida";
+    emit_start(&app, label);
+    let api_key = match repo::settings::get_openai_key(&state.pool) {
+        Ok(k) => k,
+        Err(e) => {
+            emit_error(&app, label, &e);
+            return Err(e);
+        }
+    };
+    let req = match meal_planner::build_request(&state.pool, &user_ids, &week_start, None, notes) {
+        Ok(r) => r,
+        Err(e) => {
+            emit_error(&app, label, &e);
+            return Err(e);
+        }
+    };
+    if let Err(e) = meal_planner::preflight_meal_type(&req, &meal_type) {
+        emit_error(&app, label, &e);
+        return Err(e);
+    }
+    match plan_generator::generate_meal_options(
+        &app,
+        &api_key,
+        &req,
+        &meal_type,
+        count,
+        &exclude_names,
+    )
+    .await
+    {
+        Ok(opts) => {
+            emit_done(&app, label);
+            Ok(opts)
+        }
+        Err(e) => {
+            emit_error(&app, label, &e);
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
 pub async fn plan_tweak_meal(
+    app: AppHandle,
     state: State<'_, SharedState>,
     user_ids: Vec<i64>,
     week_start: String,
@@ -71,13 +193,48 @@ pub async fn plan_tweak_meal(
     original: PlanMeal,
     user_instruction: String,
 ) -> AppResult<PlanMeal> {
-    let api_key = repo::settings::get_openai_key(&state.pool)?;
-    let req = meal_planner::build_request(&state.pool, &user_ids, &week_start, None, None)?;
-    meal_planner::preflight_meal_type(&req, &original.meal_type)?;
-    // Extraemos componentes relevantes para el tweak.
+    let label = "ajuste de comida";
+    emit_start(&app, label);
+    let api_key = match repo::settings::get_openai_key(&state.pool) {
+        Ok(k) => k,
+        Err(e) => {
+            emit_error(&app, label, &e);
+            return Err(e);
+        }
+    };
+    let req = match meal_planner::build_request(&state.pool, &user_ids, &week_start, None, None) {
+        Ok(r) => r,
+        Err(e) => {
+            emit_error(&app, label, &e);
+            return Err(e);
+        }
+    };
+    if let Err(e) = meal_planner::preflight_meal_type(&req, &original.meal_type) {
+        emit_error(&app, label, &e);
+        return Err(e);
+    }
     let users: Vec<PlanUser> = req.users;
     let allowed: Vec<AllowedGroup> = req.allowed_foods_by_group;
-    plan_generator::tweak_meal(&api_key, &users, &allowed, &original, &user_instruction, &day).await
+    match plan_generator::tweak_meal(
+        &app,
+        &api_key,
+        &users,
+        &allowed,
+        &original,
+        &user_instruction,
+        &day,
+    )
+    .await
+    {
+        Ok(meal) => {
+            emit_done(&app, label);
+            Ok(meal)
+        }
+        Err(e) => {
+            emit_error(&app, label, &e);
+            Err(e)
+        }
+    }
 }
 
 fn default_end_date(start: &str) -> String {
