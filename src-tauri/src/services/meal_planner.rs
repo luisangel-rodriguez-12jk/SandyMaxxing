@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use chrono::{Datelike, Duration, NaiveDate};
 
 use crate::ai::plan_generator::{
-    AllowedGroup, PlanPortion, PlanRequest, PlanSmoothie, PlanUser,
+    AllowedGroup, PlanPortion, PlanRequest, PlanSmoothie, PlanUser, RelaxedGroup,
 };
 use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
@@ -43,9 +43,19 @@ pub fn build_request(
             .or_default()
             .push(f.name.clone());
     }
-    let allowed_foods_by_group = by_group
+    let allowed_foods_by_group: Vec<AllowedGroup> = by_group
         .into_iter()
         .map(|(group, foods)| AllowedGroup { group, foods })
+        .collect();
+
+    // Set de grupos que SÍ tienen al menos un alimento permitido. Se usa abajo
+    // para detectar "grupos relajados" por usuario: combinaciones donde el
+    // usuario tiene porciones > 0 en un grupo que quedó vacío tras descontar
+    // los prohibidos de toda la familia.
+    let groups_with_allowed_foods: HashSet<String> = allowed_foods_by_group
+        .iter()
+        .filter(|g| !g.foods.is_empty())
+        .map(|g| g.group.clone())
         .collect();
 
     let mut users = Vec::new();
@@ -82,10 +92,31 @@ pub fn build_request(
             .collect();
         let forbidden = repo::forbidden::food_names(pool, *uid)?;
         let user_name = user.name.clone();
+
+        // Grupos relajados para este usuario: (meal_type, group) donde el
+        // usuario tiene porciones > 0 pero el catálogo (ya filtrado por la
+        // unión de prohibidos de la familia) no tiene ningún alimento en ese
+        // grupo. La IA tendrá que improvisar un alimento genérico y el
+        // validator los acepta sin exigir que estén en el catálogo.
+        let mut relaxed_groups: Vec<RelaxedGroup> = Vec::new();
+        let mut relaxed_seen: HashSet<(String, String)> = HashSet::new();
+        for p in &portions {
+            if p.portions > 0.0 && !groups_with_allowed_foods.contains(&p.group) {
+                let key = (p.meal_type.clone(), p.group.clone());
+                if relaxed_seen.insert(key.clone()) {
+                    relaxed_groups.push(RelaxedGroup {
+                        meal_type: key.0,
+                        group: key.1,
+                    });
+                }
+            }
+        }
+
         users.push(PlanUser {
             name: user.name,
             portions,
             forbidden,
+            relaxed_groups,
         });
 
         for s in repo::smoothies::list(pool, *uid).unwrap_or_default() {

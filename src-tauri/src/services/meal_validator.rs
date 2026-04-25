@@ -102,6 +102,12 @@ pub fn validate_plan_meal(meal: &PlanMeal, req: &PlanRequest) -> Vec<String> {
 struct Context {
     allowed_norm: Vec<String>,
     forbidden_per_user: Vec<(String, Vec<String>)>,
+    /// meal_types para los que AL MENOS UN usuario tiene un grupo relajado.
+    /// En esos casos no exigimos que cada ingrediente esté en el catálogo
+    /// (solo que no coincida con ningún forbidden). Esto permite a la IA
+    /// improvisar un alimento genérico cuando toda la familia tiene prohibido
+    /// el grupo (p. ej. Azúcares) pero el usuario sí tiene porción asignada.
+    relaxed_meal_types: HashSet<String>,
 }
 
 impl Context {
@@ -121,9 +127,15 @@ impl Context {
                 )
             })
             .collect();
+        let relaxed_meal_types: HashSet<String> = req
+            .users
+            .iter()
+            .flat_map(|u| u.relaxed_groups.iter().map(|r| r.meal_type.clone()))
+            .collect();
         Self {
             allowed_norm,
             forbidden_per_user,
+            relaxed_meal_types,
         }
     }
 }
@@ -142,26 +154,37 @@ fn validate_meal_inner(
     };
 
     // 1. Cada ingrediente debe existir en allowed_foods_by_group.
-    for ing in &meal.ingredients {
-        if !ingredient_is_allowed(&ing.name, &ctx.allowed_norm) {
-            issues.push(format!(
-                "{prefix} El ingrediente '{}' NO está en allowed_foods_by_group. \
-                 Reemplázalo por un alimento que sí aparezca textualmente en la lista.",
-                ing.name
-            ));
+    //    Excepción: si el meal_type tiene algún grupo relajado (porque un
+    //    usuario tiene porciones en un grupo donde toda la familia tiene
+    //    todo prohibido), la IA improvisa alimentos genéricos y no exigimos
+    //    que estén en el catálogo. La regla de "no prohibidos" sigue viva.
+    let strict_allowed_check = !ctx.relaxed_meal_types.contains(meal_type);
+    if strict_allowed_check {
+        for ing in &meal.ingredients {
+            if !ingredient_is_allowed(&ing.name, &ctx.allowed_norm) {
+                issues.push(format!(
+                    "{prefix} El ingrediente '{}' NO está en allowed_foods_by_group. \
+                     Reemplázalo por un alimento que sí aparezca textualmente en la lista.",
+                    ing.name
+                ));
+            }
         }
     }
 
     // 2. Ningún ingrediente puede ser prohibido para ningún usuario.
+    //    Usamos un match ASIMÉTRICO por tokens: los tokens del alimento prohibido
+    //    deben estar TODOS presentes como palabras en el ingrediente. Así evitamos
+    //    falsos positivos: si el usuario tiene "Costilla de res" prohibida pero "Res"
+    //    permitida, un ingrediente llamado "Res" NO debe marcarse como prohibido.
     for (user_name, forbidden_list) in &ctx.forbidden_per_user {
         for ing in &meal.ingredients {
             let ing_norm = normalize(&ing.name);
             for fb in forbidden_list {
-                if name_matches(&ing_norm, fb) {
+                if forbidden_matches(&ing_norm, fb) {
                     issues.push(format!(
-                        "{prefix} El ingrediente '{}' está PROHIBIDO para {}. \
-                         Quítalo o reemplázalo por otro alimento permitido.",
-                        ing.name, user_name
+                        "{prefix} El ingrediente '{}' está PROHIBIDO para {} (coincide con \
+                         '{}'). Quítalo o reemplázalo por otro alimento permitido.",
+                        ing.name, user_name, fb
                     ));
                 }
             }
@@ -249,19 +272,45 @@ fn ingredient_is_allowed(ingredient: &str, allowed_norm: &[String]) -> bool {
     if n.is_empty() {
         return false;
     }
-    allowed_norm.iter().any(|a| name_matches(&n, a))
+    allowed_norm.iter().any(|a| allowed_matches(&n, a))
 }
 
-/// Match tolerante: coincide si uno contiene al otro (ambos ya normalizados).
-/// Así 'pechuga de pollo' matchea 'pollo' y viceversa.
-fn name_matches(a: &str, b: &str) -> bool {
-    if a.is_empty() || b.is_empty() {
+/// Match BIDIRECCIONAL por tokens usado para validar si un ingrediente figura en
+/// la lista de permitidos. Acepta tanto 'Pechuga de pollo' (ingrediente más
+/// específico) cuando 'Pollo' está en el catálogo como 'Pollo' cuando en el
+/// catálogo aparece 'Pechuga de pollo'. Trabaja por palabras completas para
+/// evitar que 'Fresa' coincida con 'Res'.
+fn allowed_matches(ingredient_norm: &str, allowed_norm: &str) -> bool {
+    if ingredient_norm.is_empty() || allowed_norm.is_empty() {
         return false;
     }
-    a.contains(b) || b.contains(a)
+    let ing_tokens: HashSet<&str> = ingredient_norm.split_whitespace().collect();
+    let al_tokens: HashSet<&str> = allowed_norm.split_whitespace().collect();
+    if ing_tokens.is_empty() || al_tokens.is_empty() {
+        return false;
+    }
+    ing_tokens.is_subset(&al_tokens) || al_tokens.is_subset(&ing_tokens)
 }
 
-fn normalize(s: &str) -> String {
+/// Match ASIMÉTRICO por tokens usado para la lista de prohibidos. La entrada
+/// prohibida (p. ej. "Costilla de res") coincide con un ingrediente SOLO si
+/// TODAS sus palabras aparecen en el ingrediente. De esa forma:
+///   - prohibido="Res" e ingrediente="Costilla de res" → coincide ✓
+///   - prohibido="Costilla de res" e ingrediente="Res" → NO coincide ✓
+///   - prohibido="Res" e ingrediente="Fresa" → NO coincide ✓ (tokens distintos)
+pub(crate) fn forbidden_matches(ingredient_norm: &str, forbidden_norm: &str) -> bool {
+    if ingredient_norm.is_empty() || forbidden_norm.is_empty() {
+        return false;
+    }
+    let ing_tokens: HashSet<&str> = ingredient_norm.split_whitespace().collect();
+    let fb_tokens: Vec<&str> = forbidden_norm.split_whitespace().collect();
+    if fb_tokens.is_empty() {
+        return false;
+    }
+    fb_tokens.iter().all(|t| ing_tokens.contains(t))
+}
+
+pub(crate) fn normalize(s: &str) -> String {
     s.trim()
         .to_lowercase()
         .chars()

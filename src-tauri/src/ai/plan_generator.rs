@@ -23,6 +23,20 @@ pub struct PlanUser {
     pub name: String,
     pub portions: Vec<PlanPortion>,
     pub forbidden: Vec<String>,
+    /// Combinaciones (meal_type, group) donde el usuario tiene porciones > 0
+    /// pero el catálogo de `allowed_foods_by_group` no contiene alimentos de
+    /// ese grupo — porque TODOS los miembros de ese grupo están prohibidos
+    /// por algún usuario de la familia. La IA debe IMPROVISAR un alimento
+    /// genérico ligero para cubrir esa porción (ej. "fruta fresca") y el
+    /// validator acepta el ingrediente aunque no aparezca en el catálogo,
+    /// siempre que no coincida con ningún forbidden de ningún usuario.
+    pub relaxed_groups: Vec<RelaxedGroup>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct RelaxedGroup {
+    pub meal_type: String,
+    pub group: String,
 }
 
 #[derive(Serialize)]
@@ -110,6 +124,33 @@ nombres de los grupos deben coincidir con los de 'allowed_foods_by_group' y 'use
 PROHIBIDOS (NO NEGOCIABLE): si un ingrediente aparece en el arreglo 'forbidden' de CUALQUIER \
 usuario, NO puedes ponerlo en 'ingredients' (ni como sustituto ni como opcional). Revisa cada \
 ingrediente contra TODOS los forbidden de TODOS los usuarios antes de escribirlo. ";
+
+// Regla para forzar que los azúcares (cuando el usuario tiene porciones
+// asignadas al grupo) SIEMPRE aparezcan en la comida como postre ligero, y
+// para que la IA improvise alternativas naturales cuando el grupo entero está
+// prohibido por la familia (relaxed_groups).
+const SUGAR_DESSERT_RULE: &str = "\
+AZÚCARES / POSTRE LIGERO (NO NEGOCIABLE): si un usuario tiene en 'portions' asignaciones \
+para el grupo 'Azúcares' (o equivalentes como 'Dulces' o 'Postres') en el meal_type actual, \
+DEBES incluir esa porción como un POSTRE LIGERO cerrando la comida — NUNCA la ignores ni la \
+dejes en cero. Propuestas aceptables (elige las que sí estén en allowed_foods_by_group o no \
+estén prohibidas para nadie): media taza de gelatina light, un helado de agua chico, una \
+cucharadita de miel sobre yogur, chocolate sin azúcar, fruta endulzada natural, agua de \
+fruta con poca azúcar, gajos de fruta espolvoreados con canela, un pedacito de mermelada \
+sobre tortita. El postre va en 'ingredients' con la cantidad adecuada y en 'instructions' \
+como paso final ('Cierra con un postre ligero de X'). Cuéntalo exactamente en \
+portions_consumed del usuario como 1 porción de 'Azúcares' (o la cantidad asignada).\
+\
+GRUPOS RELAJADOS (relaxed_groups): si un usuario trae 'relaxed_groups' con algún \
+{meal_type, group}, significa que para ese usuario NO existe ningún alimento permitido en \
+ese grupo (toda la familia lo tiene prohibido entre todos) PERO el usuario sí tiene \
+porciones asignadas. En ese caso IMPROVISA un alimento genérico ligero que NO aparezca en \
+el 'forbidden' de NINGÚN usuario — p.ej. para 'Azúcares' relajado: 'Fruta fresca de \
+temporada', 'Puñado de bayas', 'Gajos de mandarina', 'Yogur natural sin endulzar con \
+canela', 'Fresas naturales'. Ponlo en 'ingredients' con su cantidad y cuéntalo en \
+portions_consumed normalmente. El validador acepta ingredientes fuera del catálogo cuando \
+el meal_type tiene algún grupo relajado, siempre que no coincidan con ningún prohibido. \
+JAMÁS te saltes la porción de un grupo relajado: el usuario la necesita. ";
 
 // Regla para respetar ingredientes concretos mencionados por el usuario en
 // 'notes' o 'user_instruction'. Cuando alguien pide 'algo con picaña', la IA
@@ -408,7 +449,7 @@ where
 
 pub async fn generate(app: &AppHandle, api_key: &str, req: &PlanRequest) -> AppResult<PlanResult> {
     let system = format!(
-        "{SYSTEM}\n\n{PORTIONS_RULE}\n\n{SPECIFIC_INGREDIENT_RULE}Todo en español, natural y claro."
+        "{SYSTEM}\n\n{PORTIONS_RULE}\n\n{SPECIFIC_INGREDIENT_RULE}\n\n{SUGAR_DESSERT_RULE}Todo en español, natural y claro."
     );
     let portions_block = required_portions_block_week(&req.users);
     let preamble = notes_preamble(&req.notes);
@@ -475,7 +516,7 @@ pub async fn generate_single_meal(
     meal_type: &str,
 ) -> AppResult<SingleMeal> {
     let system = format!(
-        "{SINGLE_MEAL_SYSTEM}\n\n{PORTIONS_RULE}\n\n{SPECIFIC_INGREDIENT_RULE}Todo en español."
+        "{SINGLE_MEAL_SYSTEM}\n\n{PORTIONS_RULE}\n\n{SPECIFIC_INGREDIENT_RULE}\n\n{SUGAR_DESSERT_RULE}Todo en español."
     );
     let wrapped = SingleMealRequest {
         base: req,
@@ -563,7 +604,7 @@ pub async fn generate_meal_options(
         exclude_names: exclude_names.to_vec(),
     };
     let system = format!(
-        "{MEAL_OPTIONS_SYSTEM}\n\n{PORTIONS_RULE}\n\n{SPECIFIC_INGREDIENT_RULE}Todo en español."
+        "{MEAL_OPTIONS_SYSTEM}\n\n{PORTIONS_RULE}\n\n{SPECIFIC_INGREDIENT_RULE}\n\n{SUGAR_DESSERT_RULE}Todo en español."
     );
     let portions_block = required_portions_block(&req.users, meal_type);
     let preamble = notes_preamble(&req.notes);
@@ -634,7 +675,7 @@ pub async fn tweak_meal(
         day: day.to_string(),
     };
     let system = format!(
-        "{TWEAK_SYSTEM}\n\n{PORTIONS_RULE}\n\n{SPECIFIC_INGREDIENT_RULE}Todo en español."
+        "{TWEAK_SYSTEM}\n\n{PORTIONS_RULE}\n\n{SPECIFIC_INGREDIENT_RULE}\n\n{SUGAR_DESSERT_RULE}Todo en español."
     );
     let portions_block = required_portions_block(users, &original.meal_type);
     let preamble = instruction_preamble(user_instruction);
@@ -659,6 +700,7 @@ pub async fn tweak_meal(
                 })
                 .collect(),
             forbidden: u.forbidden.clone(),
+            relaxed_groups: u.relaxed_groups.clone(),
         })
         .collect();
     let synthetic_allowed: Vec<AllowedGroup> = allowed
